@@ -1,0 +1,50 @@
+name: Build and deploy synchronizer
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build synchronizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: skfdksjdkfjsh
+          password: ${{ secrets.CR_PAT }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./synchronizer
+          push: true
+          tags: ghcr.io/skfdksjdkfjsh/synchronizer:latest
+
+  deploy:
+    name: Deploy to K8s
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+
+      - name: Apply manifests
+        run: kubectl apply -f k8s/
+
+      - name: Restart synchronizer
+        run: |
+          kubectl rollout restart deployment/synchronizer
+          kubectl rollout status deployment/synchronizer

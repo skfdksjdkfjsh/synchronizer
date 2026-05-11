@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: synchronizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: synchronizer
+  template:
+    metadata:
+      labels:
+        app: synchronizer
+    spec:
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: synchronizer
+          image: ghcr.io/skfdksjdkfjsh/synchronizer:latest
+          envFrom:
+            - secretRef:
+                name: tg-video-secret
