@@ -38,9 +38,11 @@ def fetch_tmdb_metadata(title: str) -> dict:
     if not TMDB_API_KEY or title in _tmdb_cache:
         return _tmdb_cache.get(title, {})
     try:
+        headers = {'Authorization': f'Bearer {TMDB_API_KEY}'}
         search = requests.get(
             f'{TMDB_BASE}/search/movie',
-            params={'api_key': TMDB_API_KEY, 'query': title, 'language': 'ru-RU'},
+            params={'query': title, 'language': 'ru-RU'},
+            headers=headers,
             timeout=10,
         ).json()
         results = search.get('results', [])
@@ -51,7 +53,8 @@ def fetch_tmdb_metadata(title: str) -> dict:
         movie_id = results[0]['id']
         detail = requests.get(
             f'{TMDB_BASE}/movie/{movie_id}',
-            params={'api_key': TMDB_API_KEY, 'language': 'ru-RU'},
+            params={'language': 'ru-RU'},
+            headers=headers,
             timeout=10,
         ).json()
 
