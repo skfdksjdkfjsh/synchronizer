@@ -16,11 +16,13 @@ S3_SECRET_KEY    = os.environ['S3_SECRET_KEY']
 DJANGO_API_URL   = os.environ.get('DJANGO_API_URL', 'http://backend:8000/api')
 WORKER_API_TOKEN = os.environ.get('WORKER_API_TOKEN', '')
 SYNC_INTERVAL    = int(os.environ.get('SYNC_INTERVAL', '60'))
+OMDB_API_KEY     = os.environ.get('OMDB_API_KEY', '')
 TMDB_API_KEY     = os.environ.get('TMDB_API_KEY', '')
 TMDB_BASE        = 'https://api.themoviedb.org/3'
 TMDB_IMG         = 'https://image.tmdb.org/t/p'
+OMDB_BASE        = 'http://www.omdbapi.com/'
 
-_tmdb_cache: dict = {}
+_meta_cache: dict = {}
 
 
 def get_s3_client():
@@ -34,9 +36,49 @@ def get_s3_client():
     )
 
 
+def fetch_omdb_metadata(title: str) -> dict:
+    if not OMDB_API_KEY:
+        return {}
+    try:
+        resp = requests.get(
+            OMDB_BASE,
+            params={'t': title, 'apikey': OMDB_API_KEY, 'type': 'movie'},
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get('Response') != 'True':
+            return {}
+        meta = {}
+        if data.get('Title'):
+            meta['title'] = data['Title']
+        if data.get('Year'):
+            try:
+                meta['year'] = int(data['Year'][:4])
+            except ValueError:
+                pass
+        if data.get('Plot') and data['Plot'] != 'N/A':
+            meta['description'] = data['Plot']
+        if data.get('Poster') and data['Poster'] != 'N/A':
+            meta['poster_url'] = data['Poster']
+        if data.get('imdbRating') and data['imdbRating'] != 'N/A':
+            try:
+                meta['rating'] = round(float(data['imdbRating']), 1)
+            except ValueError:
+                pass
+        if data.get('Genre') and data['Genre'] != 'N/A':
+            meta['genres'] = [g.strip() for g in data['Genre'].split(',')]
+        if data.get('Runtime') and data['Runtime'] != 'N/A':
+            meta['runtime'] = data['Runtime']
+        logger.info('OMDB нашёл "%s" → "%s" (%s)', title, meta.get('title', title), data.get('imdbID'))
+        return meta
+    except Exception as e:
+        logger.warning('OMDB ошибка для "%s": %s', title, e)
+        return {}
+
+
 def fetch_tmdb_metadata(title: str) -> dict:
-    if not TMDB_API_KEY or title in _tmdb_cache:
-        return _tmdb_cache.get(title, {})
+    if not TMDB_API_KEY:
+        return {}
     try:
         headers = {'Authorization': f'Bearer {TMDB_API_KEY}'}
         search = requests.get(
@@ -47,9 +89,7 @@ def fetch_tmdb_metadata(title: str) -> dict:
         ).json()
         results = search.get('results', [])
         if not results:
-            _tmdb_cache[title] = {}
             return {}
-
         movie_id = results[0]['id']
         detail = requests.get(
             f'{TMDB_BASE}/movie/{movie_id}',
@@ -57,7 +97,6 @@ def fetch_tmdb_metadata(title: str) -> dict:
             headers=headers,
             timeout=10,
         ).json()
-
         meta = {}
         if detail.get('title'):
             meta['title'] = detail['title']
@@ -79,14 +118,19 @@ def fetch_tmdb_metadata(title: str) -> dict:
             meta['runtime'] = f'{detail["runtime"]} мин'
         if detail.get('popularity'):
             meta['popularity_score'] = int(detail['popularity'])
-
-        _tmdb_cache[title] = meta
         logger.info('TMDB нашёл "%s" → "%s" (%s)', title, meta.get('title', title), movie_id)
         return meta
     except Exception as e:
         logger.warning('TMDB ошибка для "%s": %s', title, e)
-        _tmdb_cache[title] = {}
         return {}
+
+
+def fetch_metadata(title: str) -> dict:
+    if title in _meta_cache:
+        return _meta_cache[title]
+    meta = fetch_omdb_metadata(title) or fetch_tmdb_metadata(title)
+    _meta_cache[title] = meta
+    return meta
 
 
 def list_downloads(s3):
@@ -97,7 +141,6 @@ def list_downloads(s3):
         for obj in page.get('Contents', []):
             key = obj['Key']
             parts = key.split('/')
-            # downloads / streamer / name / video_N.ext
             if len(parts) < 4:
                 continue
             _, streamer_slug, name_slug, filename = parts[0], parts[1], parts[2], parts[3]
@@ -109,7 +152,6 @@ def list_downloads(s3):
 
 
 def upsert_film(streamer_slug: str, name_slug: str, s3_urls: list):
-    # Пропускаем папки с числовыми именами (тестовые загрузки)
     if name_slug.isdigit():
         logger.debug('Пропускаю числовую папку: %s', name_slug)
         return
@@ -118,14 +160,15 @@ def upsert_film(streamer_slug: str, name_slug: str, s3_urls: list):
     slug  = name_slug.lower()
 
     payload = {
-        'slug':    slug,
-        'title':   title,
-        's3_urls': sorted(s3_urls),
+        'slug':            slug,
+        'title':           title,
+        's3_urls':         sorted(s3_urls),
         'download_status': 'done',
+        'streamer_slug':   streamer_slug,
     }
 
-    tmdb = fetch_tmdb_metadata(title)
-    payload.update(tmdb)
+    meta = fetch_metadata(title)
+    payload.update(meta)
 
     headers = {'Authorization': f'Token {WORKER_API_TOKEN}'} if WORKER_API_TOKEN else {}
     try:
